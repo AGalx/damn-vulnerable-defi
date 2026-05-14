@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MIT
 // Damn Vulnerable DeFi v4 (https://damnvulnerabledefi.xyz)
-pragma solidity =0.8.25;
+pragma solidity ^0.8.0;
 
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {
+    ReentrancyGuard
+} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {DamnValuableToken} from "../DamnValuableToken.sol";
 
 contract TrusterLenderPool is ReentrancyGuard {
@@ -17,11 +19,12 @@ contract TrusterLenderPool is ReentrancyGuard {
         token = _token;
     }
 
-    function flashLoan(uint256 amount, address borrower, address target, bytes calldata data)
-        external
-        nonReentrant
-        returns (bool)
-    {
+    function flashLoan(
+        uint256 amount,
+        address borrower,
+        address target,
+        bytes calldata data
+    ) external nonReentrant returns (bool) {
         uint256 balanceBefore = token.balanceOf(address(this));
 
         token.transfer(borrower, amount);

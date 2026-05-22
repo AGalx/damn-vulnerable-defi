@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Damn Vulnerable DeFi v4 (https://damnvulnerabledefi.xyz)
-pragma solidity =0.8.25;
+pragma solidity ^0.8.0;
 
 import {Test, console} from "forge-std/Test.sol";
 import {IPermit2} from "permit2/interfaces/IPermit2.sol";
@@ -230,6 +230,7 @@ contract CurvyPuppetChallenge is Test {
     uint256 constant USER_BORROW_AMOUNT = 1e18;
     uint256 constant ETHER_PRICE = 4000e18;
     uint256 constant DVT_PRICE = 10e18;
+    uint256 constant MAINNET_FORK_TIMESTAMP = 1_719_580_000;
 
     DamnValuableToken dvt;
     CurvyPuppetLending lending;
@@ -243,7 +244,13 @@ contract CurvyPuppetChallenge is Test {
     }
 
     function setUp() public {
-        vm.createSelectFork((vm.envString("MAINNET_FORKING_URL")), 20190356);
+        if (address(curvePool).code.length == 0) {
+            vm.createSelectFork(
+                (vm.envString("MAINNET_FORKING_URL")),
+                20190356
+            );
+        }
+        vm.warp(MAINNET_FORK_TIMESTAMP);
 
         startHoax(deployer);
 
@@ -269,7 +276,7 @@ contract CurvyPuppetChallenge is Test {
         });
 
         // The challenge gives the player access to treasury funds, not ownership.
-        deal(address(weth), treasury, TREASURY_WETH_BALANCE);
+        _dealWeth(treasury, TREASURY_WETH_BALANCE);
 
         vm.startPrank(0x4F48031B0EF8acCea3052Af00A3279fbA31b50D8);
         IERC20(curvePool.lp_token()).transfer(
@@ -291,6 +298,13 @@ contract CurvyPuppetChallenge is Test {
         }
     }
 
+    function _dealWeth(address who, uint256 amount) private {
+        // WETH9 stores balanceOf at slot 3. Avoid forge-std's ERC20 deal helper,
+        // which uses vm.record(), a cheatcode Echidna does not support.
+        bytes32 slot = keccak256(abi.encode(who, uint256(3)));
+        vm.store(address(weth), slot, bytes32(amount));
+    }
+
     function _openPositionFor(address who) private {
         vm.startPrank(who);
         address collateralAsset = lending.collateralAsset();
@@ -303,6 +317,66 @@ contract CurvyPuppetChallenge is Test {
         });
         lending.deposit(USER_INITIAL_COLLATERAL_BALANCE);
         lending.borrow(USER_BORROW_AMOUNT);
+    }
+
+    function echidna_check_if_liquidated_possible() public view returns (bool) {
+        address[3] memory users = [alice, bob, charlie];
+        for (uint256 i = 0; i < users.length; i++) {
+            if (
+                lending.getCollateralAmount(users[i]) !=
+                USER_INITIAL_COLLATERAL_BALANCE
+            ) return false;
+
+            if (lending.getBorrowAmount(users[i]) != USER_BORROW_AMOUNT) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    function tryLiquidateAlice() public {
+        vm.prank(player);
+        try lending.liquidate(alice) {} catch {}
+    }
+
+    function tryLiquidateBob() public {
+        vm.prank(player);
+        try lending.liquidate(bob) {} catch {}
+    }
+
+    function tryLiquidateCharlie() public {
+        vm.prank(player);
+        try lending.liquidate(charlie) {} catch {}
+    }
+
+    function tryAttackPassing() public {
+        CurvyPuppetAttacker attacker2 = new CurvyPuppetAttacker(
+            lending,
+            treasury,
+            alice,
+            bob,
+            charlie
+        );
+
+        vm.startPrank(player);
+
+        try
+            weth.transferFrom(
+                treasury,
+                address(attacker2),
+                TREASURY_WETH_BALANCE
+            )
+        returns (bool) {} catch {}
+        try
+            IERC20(curvePool.lp_token()).transferFrom(
+                treasury,
+                address(attacker2),
+                TREASURY_LP_BALANCE
+            )
+        returns (bool) {} catch {}
+        try attacker2.attack() {} catch {}
+        vm.stopPrank(); //
     }
 
     function test_assertInitialState() public view {

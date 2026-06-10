@@ -103,7 +103,9 @@ contract Attacker is IProxyCreationCallback {
         );
     }
 
-    function createProxyWithCallback(uint256 saltNonce) external returns (SafeProxy proxy) {
+    function createProxyWithCallback(
+        uint256 saltNonce
+    ) external returns (SafeProxy proxy) {
         // Handy wrapper for checking that the same initializer/salt really hits the target.
         proxy = factory.createProxyWithCallback(
             singleton,
@@ -142,7 +144,6 @@ contract Attacker is IProxyCreationCallback {
             );
     }
 }
-
 
 contract WalletMiningChallenge is Test {
     address deployer = makeAddr("deployer");
